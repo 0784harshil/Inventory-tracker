@@ -11,7 +11,7 @@ const navItems = [
     { href: '/reports', label: 'Reports', icon: '📋' },
 ];
 
-export default function Sidebar() {
+export default function Sidebar({ isOpen, onClose }) {
     const pathname = usePathname();
 
     const isActive = (href) => {
@@ -22,10 +22,13 @@ export default function Sidebar() {
     };
 
     return (
-        <aside className="sidebar">
-            <div className="sidebar-logo">
-                <div className="sidebar-logo-icon">📦</div>
-                <span className="sidebar-logo-text">StockFlow</span>
+        <aside className={`sidebar ${isOpen ? 'open' : ''}`}>
+            <div className="sidebar-header-row">
+                <div className="sidebar-logo">
+                    <div className="sidebar-logo-icon">JG</div>
+                    <span className="sidebar-logo-text">JDGurus</span>
+                </div>
+                <button className="sidebar-close-btn" onClick={onClose}>×</button>
             </div>
 
             <nav className="sidebar-nav">
@@ -34,6 +37,7 @@ export default function Sidebar() {
                         key={item.href}
                         href={item.href}
                         className={`sidebar-link ${isActive(item.href) ? 'active' : ''}`}
+                        onClick={onClose} // Close on navigation on mobile
                     >
                         <span className="sidebar-link-icon">{item.icon}</span>
                         {item.label}
@@ -43,7 +47,7 @@ export default function Sidebar() {
 
             <div className="sidebar-section">
                 <div className="sidebar-section-title">Quick Actions</div>
-                <Link href="/transfers/new" className="sidebar-link">
+                <Link href="/transfers/new" className="sidebar-link" onClick={onClose}>
                     <span className="sidebar-link-icon">➕</span>
                     New Transfer
                 </Link>
@@ -60,6 +64,9 @@ export default function Sidebar() {
                         </div>
                     </div>
                 </div>
+            </div>
+            <div className="sidebar-footer" style={{ marginTop: 'auto', paddingTop: '2rem', paddingLeft: '1rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                Provided by JDGurus
             </div>
         </aside>
     );
