@@ -65,13 +65,28 @@ function NewTransferForm() {
         }
     };
 
-    const fetchInventoryForStore = async (storeCode) => {
+    // Debounce search
+    useEffect(() => {
+        const timeoutId = setTimeout(() => {
+            if (fromStore) {
+                fetchInventoryForStore(fromStore, searchTerm);
+            }
+        }, 400);
+        return () => clearTimeout(timeoutId);
+    }, [searchTerm, fromStore]);
+
+    const fetchInventoryForStore = async (storeCode, search = '') => {
         try {
-            // Fetch with larger page size since we need to show item picker
-            const res = await fetch(`/api/inventory?store=${storeCode}&pageSize=200`);
+            // Fetch items from server - search query is passed to API
+            const queryParams = new URLSearchParams({
+                store: storeCode,
+                pageSize: '50', // Fetch 50 matches
+                search: search
+            });
+
+            const res = await fetch(`/api/inventory?${queryParams.toString()}`);
             if (res.ok) {
                 const data = await res.json();
-                // API returns { items: [], pagination: {} }
                 setInventory(data.items || []);
             }
         } catch (err) {
@@ -148,15 +163,7 @@ function NewTransferForm() {
         }
     };
 
-    // Filter inventory by search
-    const filteredInventory = inventory.filter(item => {
-        if (!searchTerm) return true;
-        const search = searchTerm.toLowerCase();
-        return (
-            item.item_name?.toLowerCase().includes(search) ||
-            item.item_num?.toLowerCase().includes(search)
-        );
-    });
+
 
     const totalItems = selectedItems.reduce((sum, item) => sum + item.quantity, 0);
 
@@ -232,7 +239,7 @@ function NewTransferForm() {
                             <div className="card-header">
                                 <h2>Select Items</h2>
                                 {fromStore && (
-                                    <span className="item-count">{inventory.length} items available</span>
+                                    <span className="item-count">Showing {inventory.length} items</span>
                                 )}
                             </div>
                             <div className="card-content">
@@ -252,10 +259,10 @@ function NewTransferForm() {
                                             />
                                         </div>
                                         <div className="item-picker-list">
-                                            {filteredInventory.length === 0 ? (
+                                            {inventory.length === 0 ? (
                                                 <p className="empty-message">No items found</p>
                                             ) : (
-                                                filteredInventory.slice(0, 50).map(item => (
+                                                inventory.slice(0, 50).map(item => (
                                                     <div
                                                         key={item.id}
                                                         className={`item-picker-row ${selectedItems.find(i => i.item_num === item.item_num) ? 'selected' : ''}`}
@@ -274,8 +281,8 @@ function NewTransferForm() {
                                                     </div>
                                                 ))
                                             )}
-                                            {filteredInventory.length > 50 && (
-                                                <p className="more-items">Showing 50 of {filteredInventory.length} items. Use search to find more.</p>
+                                            {inventory.length >= 50 && (
+                                                <p className="more-items">Showing top 50 matches. Refine search for more.</p>
                                             )}
                                         </div>
                                     </>
