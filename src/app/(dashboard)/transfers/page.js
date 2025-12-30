@@ -83,14 +83,8 @@ export default function TransfersPage() {
                     { label: 'Approve', status: 'approved', class: 'btn-success' },
                     { label: 'Cancel', status: 'cancelled', class: 'btn-danger' }
                 ];
-            case 'approved':
-                return [
-                    { label: 'Mark In Transit', status: 'in_transit', class: 'btn-primary' }
-                ];
-            case 'in_transit':
-                return [
-                    { label: 'Mark Completed', status: 'completed', class: 'btn-success' }
-                ];
+            // Cases for 'approved' and 'in_transit' removed to prevent manual intervention
+            // The Sync Agent handles these transitions automatically.
             default:
                 return [];
         }

@@ -287,13 +287,20 @@ class SyncAgent:
                 
                 if operation == 'add':
                     new_stock = old_stock + quantity_change
-                    update_query = f"UPDATE Inventory SET In_Stock = In_Stock + ? {where_clause}"
-                else:  # subtract
+                    # USE ABSOLUTE UPDATE
+                    update_query = f"UPDATE Inventory SET In_Stock = ? {where_clause}"
+                    update_params = [new_stock, item_num]
+                    
+                elif operation == 'subtract':
                     new_stock = old_stock - quantity_change
-                    update_query = f"UPDATE Inventory SET In_Stock = In_Stock - ? {where_clause}"
-                
-                # Params: quantity, item_num, [store_id]
-                update_params = [quantity_change, item_num]
+                    # USE ABSOLUTE UPDATE
+                    update_query = f"UPDATE Inventory SET In_Stock = ? {where_clause}"
+                    update_params = [new_stock, item_num]
+                    
+                else:
+                    logger.error(f"Unknown operation: {operation}")
+                    return {'success': False, 'old_stock': old_stock, 'new_stock': old_stock, 'item_name': existing_name}
+
                 if hasattr(self, 'local_store_id') and self.local_store_id:
                     update_params.append(self.local_store_id)
                     
@@ -443,9 +450,15 @@ class SyncAgent:
             all_success = True
             for item in items:
                 quantity = float(item['quantity'])
+                # Strip whitespace to match SQL Server's trimmed/varchar keys
+                raw_item_num = item['item_num']
+                item_num = str(raw_item_num).strip()
+                
+                logger.info(f"Processing Item: '{item_num}' (Raw: '{raw_item_num}', Len: {len(item_num)})")
+                
                 # Decrement stock in local SQL Server
                 result = self.update_local_stock(
-                    item['item_num'], 
+                    item_num, 
                     quantity, 
                     'subtract'
                 )
@@ -473,7 +486,9 @@ class SyncAgent:
                 # Only update status to 'in_transit' if it was 'approved'
                 # If it's 'completed' or 'received', leave status alone, just set shipped_at
                 if status == 'approved':
-                    update_data['status'] = 'in_transit'
+                    # AUTO-COMPLETE MODE: Skip 'in_transit' and go straight to 'completed'
+                    # This allows the Destination Agent to pick it up immediately without manual "Receive" click
+                    update_data['status'] = 'completed'
                     
                 self.supabase.update('transfers', update_data, {'id': transfer_id})
                 
@@ -570,26 +585,27 @@ class SyncAgent:
                 logger.info("=" * 50)
                 logger.info("Starting sync cycle...")
                 
-                # 1. Fetch inventory from SQL Server
+                # 1. Process outgoing transfers (approved -> in_transit)
+                # Do this FIRST so local DB is updated before we read inventory
+                outgoing = self.process_outgoing_transfers()
+                
+                # 2. Process incoming transfers (completed -> received)
+                incoming = self.process_incoming_transfers()
+
+                # 3. Fetch inventory from SQL Server (now includes verified stock updates)
                 inventory = self.fetch_inventory_from_sql()
                 logger.info(f"Fetched {len(inventory)} items from SQL Server")
                 
-                # 2. Sync to cloud
+                # 4. Sync to cloud
                 synced_count = self.sync_inventory_to_cloud(inventory)
-                
-                # 3. Process outgoing transfers (approved -> in_transit)
-                outgoing = self.process_outgoing_transfers()
-                
-                # 4. Process incoming transfers (completed -> received)
-                incoming = self.process_incoming_transfers()
                 
                 # 5. Log sync
                 self.log_sync('full', 'completed', synced_count)
                 
                 logger.info(f"Sync cycle complete:")
-                logger.info(f"  - Inventory synced: {synced_count}")
                 logger.info(f"  - Outgoing transfers processed: {outgoing}")
                 logger.info(f"  - Incoming transfers processed: {incoming}")
+                logger.info(f"  - Inventory synced: {synced_count}")
                 logger.info(f"Next sync in {self.sync_interval} seconds.")
                 logger.info("=" * 50)
                 
