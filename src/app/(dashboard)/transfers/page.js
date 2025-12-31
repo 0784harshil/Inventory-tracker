@@ -77,14 +77,22 @@ export default function TransfersPage() {
     };
 
     const getNextActions = (status) => {
-        switch (status) {
+        if (!status) return [];
+        const currentStatus = status.toLowerCase();
+
+        switch (currentStatus) {
             case 'pending':
                 return [
                     { label: 'Approve', status: 'approved', class: 'btn-success' },
                     { label: 'Cancel', status: 'cancelled', class: 'btn-danger' }
                 ];
-            // Cases for 'approved' and 'in_transit' removed to prevent manual intervention
-            // The Sync Agent handles these transitions automatically.
+            // Explicitly return empty array for these statuses
+            case 'approved':
+            case 'in_transit':
+            case 'completed':
+            case 'received':
+            case 'cancelled':
+                return [];
             default:
                 return [];
         }
