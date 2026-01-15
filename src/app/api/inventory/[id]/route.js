@@ -36,7 +36,7 @@ export async function PATCH(request, context) {
         // Allow updating specific fields
         if (body.item_name !== undefined) updateData.item_name = body.item_name;
         if (body.dept_id !== undefined) updateData.dept_id = body.dept_id;
-        if (body.item_type !== undefined) updateData.itemtype = parseInt(body.item_type);
+        if (body.item_type !== undefined) updateData.itemtype = parseInt(body.item_type) || 0; // Default to 0
         if (body.in_stock !== undefined) updateData.in_stock = parseFloat(body.in_stock);
         if (body.cost !== undefined) updateData.cost = parseFloat(body.cost);
         if (body.price !== undefined) {

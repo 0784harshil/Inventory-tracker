@@ -258,6 +258,77 @@ class SyncAgent:
         except Exception as e:
             log(f"[ERROR] Sync inventory failed: {e}", "ERROR")
 
+    def process_transfers(self):
+        """Process incoming transfers"""
+        try:
+            headers = {'apikey': SUPABASE_KEY, 'Authorization': f'Bearer {SUPABASE_KEY}'}
+            res = requests.get(f'{SUPABASE_URL}/rest/v1/transfers?to_store=eq.{STORE_ID}&status=eq.in-transit', headers=headers)
+            if res.status_code == 200:
+                transfers = res.json()
+                if transfers:
+                    log(f"[IN] Found {len(transfers)} incoming transfers")
+                    cursor = self.sql_conn.cursor()
+                    for t in transfers:
+                        try:
+                            # Update Local Stock
+                            cursor.execute("UPDATE Inventory SET In_Stock = In_Stock + ? WHERE ItemNum = ?", (t['quantity'], t['item_num']))
+                            if cursor.rowcount == 0:
+                                # Item doesn't exist, create it? (Optional, skipping for now)
+                                log(f"[WARN] Transfer item {t['item_num']} not found locally, skipping stock add.")
+                            else:
+                                self.sql_conn.commit()
+
+                            # Mark Complete
+                            requests.patch(f'{SUPABASE_URL}/rest/v1/transfers?id=eq.{t["id"]}', 
+                                         headers=headers, 
+                                         json={'status': 'completed', 'received_at': datetime.now(timezone.utc).isoformat()})
+                            
+                            log(f"[OK] Processed transfer {t['id']} ({t['item_name']})")
+                        except Exception as ex:
+                            log(f"[ERROR] Failed transfer {t['id']}: {ex}")
+        except Exception as e:
+            log(f"[ERROR] Error processing transfers: {e}", "ERROR")
+
+    def process_soft_deletes(self):
+        """Explicitly process any items marked as DELETED in Cloud - runs every cycle"""
+        try:
+            headers = {'apikey': SUPABASE_KEY, 'Authorization': f'Bearer {SUPABASE_KEY}'}
+            # Fetch ALL items marked DELETED for this store (no timestamp filter)
+            res = requests.get(f'{SUPABASE_URL}/rest/v1/inventory?item_name=eq.DELETED&store_id=eq.{STORE_ID}', headers=headers)
+            
+            if res.status_code == 200:
+                deleted_items = res.json()
+                if deleted_items:
+                    log(f"[DELETE] Found {len(deleted_items)} items marked for deletion")
+                    cursor = self.sql_conn.cursor()
+                    
+                    for item in deleted_items:
+                        item_num = str(item['item_num']).strip()
+                        try:
+                            # Delete from Local SQL
+                            cursor.execute("DELETE FROM Inventory WHERE ItemNum = ?", (item_num,))
+                            self.sql_conn.commit()
+                            log(f"[DELETE] Removed {item_num} from Local DB")
+                            
+                            # Clean up Cloud (hard delete the DELETED marker)
+                            requests.delete(f'{SUPABASE_URL}/rest/v1/inventory?item_num=eq.{item_num}&store_id=eq.{STORE_ID}', headers=headers)
+                            log(f"[DELETE] Cleaned up {item_num} from Cloud")
+                        except Exception as del_err:
+                            if '547' in str(del_err) or 'REFERENCE' in str(del_err).upper():
+                                # FK constraint - mark as deleted instead
+                                try:
+                                    cursor.execute("UPDATE Inventory SET ItemName = '[DELETED] ' + LEFT(ItemName, 15), In_Stock = 0 WHERE ItemNum = ?", (item_num,))
+                                    self.sql_conn.commit()
+                                    log(f"[DELETE] Marked {item_num} as [DELETED] locally (FK constraint)")
+                                    # Still clean up cloud
+                                    requests.delete(f'{SUPABASE_URL}/rest/v1/inventory?item_num=eq.{item_num}&store_id=eq.{STORE_ID}', headers=headers)
+                                except:
+                                    pass
+                            else:
+                                log(f"[WARN] Failed to delete {item_num}: {del_err}")
+        except Exception as e:
+            log(f"[ERROR] Soft Delete processing failed: {e}")
+
     def sync_down_departments(self, last_sync):
         """Fetch updated departments from Cloud -> Local"""
         try:
@@ -483,6 +554,9 @@ class SyncAgent:
                 
                 # 5. Transfers
                 self.process_transfers()
+                
+                # 6. Process Soft Deletes (explicit check every cycle)
+                self.process_soft_deletes()
                 
                 log(f" Waiting {SYNC_INTERVAL}s...")
                 time.sleep(SYNC_INTERVAL)

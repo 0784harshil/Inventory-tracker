@@ -2,7 +2,7 @@
 import pyodbc
 import configparser
 
-ITEM_NUM = "851233007003"
+ITEM_NUM = "080686833178"
 
 # Load config
 config = configparser.ConfigParser()
@@ -13,17 +13,17 @@ print(f"CONFIG says sync to: {SQL_DATABASE}")
 print("=" * 60)
 
 # Check ALL databases for this item
-DATABASES = ['cresql', 'cresqlh', 'cresqldekalb', 'cresqlp', 'cresqlpridom']
+DATABASES = ['cresql', 'cresqlh', 'cresqlk', 'cresqldekalb', 'cresqlp', 'cresqlpridom']
 
 for db in DATABASES:
     conn_str = f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={SQL_SERVER};DATABASE={db};Trusted_Connection=yes;'
     try:
         conn = pyodbc.connect(conn_str)
         cursor = conn.cursor()
-        cursor.execute("SELECT ItemNum, ItemName, ItemType FROM Inventory WHERE ItemNum = ?", ITEM_NUM)
+        cursor.execute("SELECT ItemNum, ItemName, ItemType, In_Stock FROM Inventory WHERE ItemNum = ?", ITEM_NUM)
         row = cursor.fetchone()
         if row:
-            print(f"✅ FOUND in {db}: {row.ItemName} (ItemType: {row.ItemType})")
+            print(f"✅ FOUND in {db}: {row.ItemName} (ItemType: {row.ItemType}, Stock: {row.In_Stock})")
         else:
             print(f"❌ NOT FOUND in {db}")
         conn.close()

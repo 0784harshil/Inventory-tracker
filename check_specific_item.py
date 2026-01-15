@@ -4,7 +4,7 @@ import requests
 import json
 import configparser
 
-ITEM_NUM = "009016019334"
+ITEM_NUM = "080686833178"
 
 # Load config
 config = configparser.ConfigParser()
@@ -33,6 +33,7 @@ try:
         print(f" - Name: {row.ItemName}")
         print(f" - Cost: {row.Cost}")
         print(f" - Price: {row.Price}")
+        print(f" - In_Stock: {row.In_Stock}")
         print(f" - ItemType: {row.ItemType}")
         print(f" - Updated: {row.Local_Updated_At}")
     else:
@@ -43,19 +44,23 @@ except Exception as e:
 
 # Cloud
 print("-" * 30)
+# Cloud
+print("-" * 30)
 res = requests.get(f"{SUPABASE_URL}/rest/v1/inventory?item_num=eq.{ITEM_NUM}", headers=headers)
 if res.status_code == 200:
     items = res.json()
+    items = res.json()
     if items:
-        i = items[0]
-        print(f"CLOUD (Supabase):")
-        print(f" - Name: {i.get('item_name')}")
-        print(f" - Store: {i.get('store_id')}")
-        print(f" - Cost: {i.get('cost')}")
-        print(f" - Price: {i.get('price')}")
-        print(f" - ItemType: {i.get('itemtype')}")
-        print(f" - Updated: {i.get('updated_at')}")
-        print(f" - Is Deleted? {i.get('item_name') == 'DELETED'}")
+        for i in items:
+            print(f"CLOUD (Supabase) - {i.get('store_id')}:")
+            print(f" - Name: {i.get('item_name')}")
+            print(f" - Cost: {i.get('cost')}")
+            print(f" - Price: {i.get('price')}")
+            print(f" - In_Stock: {i.get('in_stock')}")
+            print(f" - ItemType: {i.get('itemtype')}")
+            print(f" - Updated: {i.get('updated_at')}")
+            print(f" - Is Deleted? {i.get('item_name') == 'DELETED'}")
+            print("-" * 20)
     else:
         print("CLOUD: ❌ Item NOT FOUND")
 else:
