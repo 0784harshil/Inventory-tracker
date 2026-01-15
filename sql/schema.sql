@@ -40,6 +40,17 @@ CREATE TABLE IF NOT EXISTS inventory (
     UNIQUE(item_num, store_id)
 );
 
+-- Departments table (synced from local SQL Server)
+CREATE TABLE IF NOT EXISTS departments (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    dept_id VARCHAR(8) NOT NULL,
+    store_id VARCHAR(10) NOT NULL REFERENCES stores(store_id),
+    description VARCHAR(30),
+    last_synced_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(dept_id, store_id)
+);
+
 -- Transfers table
 CREATE TABLE IF NOT EXISTS transfers (
     id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,

@@ -1,0 +1,5 @@
+
+pyodbc
+requests
+python-dotenv
+pyinstaller

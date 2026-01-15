@@ -1,26 +1,23 @@
 @echo off
-echo Installing Sync Agent to Startup...
+set "SCRIPT_DIR=%~dp0"
+set "SHORTCUT_PATH=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\StockFlowAgent.lnk"
+set "TARGET_EXE=%SCRIPT_DIR%sync_agent.exe"
 
-set "ShortcutName=SyncAgent.lnk"
-set "StartupDir=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
-set "TargetPath=%~dp0SyncAgent.exe"
-set "WorkingDir=%~dp0"
-
-echo Target Path: %TargetPath%
-echo Startup Dir: %StartupDir%
-
-powershell "$s=(New-Object -COM WScript.Shell).CreateShortcut('%StartupDir%\%ShortcutName%');$s.TargetPath='%TargetPath%';$s.WorkingDirectory='%WorkingDir%';$s.Save()"
-
-if exist "%StartupDir%\%ShortcutName%" (
-    echo.
-    echo SUCCESS: Sync Agent has been added to startup!
-    echo It will start automatically when you restart the computer.
-    echo.
-    echo Starting agent now...
-    start "" "%TargetPath%"
-) else (
-    echo.
-    echo ERROR: Failed to create startup shortcut.
+if not exist "%TARGET_EXE%" (
+    echo Error: sync_agent.exe not found in %SCRIPT_DIR%
+    pause
+    exit /b
 )
 
+echo Creating startup shortcut...
+echo Target: %TARGET_EXE%
+echo Location: %SHORTCUT_PATH%
+
+powershell "$s=(New-Object -COM WScript.Shell).CreateShortcut('%SHORTCUT_PATH%');$s.TargetPath='%TARGET_EXE%';$s.WorkingDirectory='%SCRIPT_DIR%';$s.Save()"
+
+echo.
+echo ========================================================
+echo   SUCCESS! StockFlow Agent will now start automatically.
+echo ========================================================
+echo.
 pause
