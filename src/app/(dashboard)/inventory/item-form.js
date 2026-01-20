@@ -8,6 +8,7 @@ export default function ItemForm({ initialData = null }) {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [stores, setStores] = useState([]);
+    const [departments, setDepartments] = useState([]);
     const [validationErrors, setValidationErrors] = useState({});
 
     // "Lazy" Defaults
@@ -36,6 +37,7 @@ export default function ItemForm({ initialData = null }) {
 
     useEffect(() => {
         fetchStores();
+        fetchDepartments();
     }, []);
 
     // Auto-select all stores for new items (Lazy convenience)
@@ -73,6 +75,29 @@ export default function ItemForm({ initialData = null }) {
             }
         } catch (err) {
             console.error('Error fetching stores:', err);
+        }
+    };
+
+    const fetchDepartments = async () => {
+        try {
+            const res = await fetch('/api/departments');
+            if (res.ok) {
+                const data = await res.json();
+                // Deduplicate by dept_id
+                const uniqueDepts = [];
+                const seenIds = new Set();
+                data.forEach(d => {
+                    const id = (d.dept_id || '').trim();
+                    if (id && !seenIds.has(id)) {
+                        seenIds.add(id);
+                        uniqueDepts.push({ ...d, dept_id: id });
+                    }
+                });
+                uniqueDepts.sort((a, b) => (a.description || '').localeCompare(b.description || ''));
+                setDepartments(uniqueDepts);
+            }
+        } catch (err) {
+            console.error('Error fetching departments:', err);
         }
     };
 
@@ -221,7 +246,7 @@ export default function ItemForm({ initialData = null }) {
                         </div>
 
                         {/* Identification */}
-                        <div className="dashboard-grid" style={{ gridTemplateColumns: '1fr 2fr 1fr', gap: '1.5rem', marginBottom: '1.5rem' }}>
+                        <div className="dashboard-grid" style={{ gridTemplateColumns: '1fr 2fr 1fr 1fr', gap: '1rem', marginBottom: '1.5rem' }}>
                             <div className="form-group">
                                 <label className="block text-sm font-medium text-gray-400 mb-2">UPC / Item # *</label>
                                 <input
@@ -244,6 +269,22 @@ export default function ItemForm({ initialData = null }) {
                                     className={`search-input ${validationErrors.item_name ? 'border-red-500' : ''}`}
                                     placeholder="Product description"
                                 />
+                            </div>
+                            <div className="form-group">
+                                <label className="block text-sm font-medium text-gray-400 mb-2">Department</label>
+                                <select
+                                    name="dept_id"
+                                    value={formData.dept_id}
+                                    onChange={handleChange}
+                                    className="search-input"
+                                >
+                                    <option value="NONE">Select Dept...</option>
+                                    {departments.map(d => (
+                                        <option key={d.dept_id} value={d.dept_id}>
+                                            {d.description}
+                                        </option>
+                                    ))}
+                                </select>
                             </div>
                             <div className="form-group">
                                 <label className="block text-sm font-medium text-gray-400 mb-2">Item Type</label>

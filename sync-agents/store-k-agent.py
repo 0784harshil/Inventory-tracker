@@ -8,7 +8,12 @@ import sys
 from datetime import datetime, timezone
 
 # --- CONFIGURATION ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# When running as frozen EXE, use the directory where the EXE is located
+# When running as script, use the directory where the script is located
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, 'config-k.ini')
 STATE_FILE = os.path.join(BASE_DIR, 'store_k_sync_state.json')
 
@@ -84,14 +89,20 @@ class SyncAgent:
 
     def fetch_local_store_id(self):
         try:
+            # FORCE STORE ID FOR SIMULATION (Since we are running H and K on same DB)
+            if str(STORE_ID) == '1002':
+                self.local_store_id = '1002'
+                log("[INFO] SIMULATION MODE: Forcing Local Store ID to 1002")
+                return
+
             cursor = self.sql_conn.cursor()
             cursor.execute("SELECT TOP 1 Store_ID FROM Inventory")
             row = cursor.fetchone()
             if row and row.Store_ID:
-                self.local_store_id = row.Store_ID
+                self.local_store_id = str(row.Store_ID)
                 log(f"[INFO] Detected Local Store ID: {self.local_store_id}")
             else:
-                self.local_store_id = STORE_ID
+                self.local_store_id = str(STORE_ID)
                 log(f"[WARN] Could not detect Local Store ID. Using Config: {self.local_store_id}")
         except:
             self.local_store_id = STORE_ID
@@ -111,6 +122,32 @@ class SyncAgent:
                 log("[INFO] Added ItemType column to Inventory table.")
             except Exception as e:
                 log(f"[ERROR] Failed to add ItemType column: {e}", "ERROR")
+
+        # Check Local_Updated_At
+        try:
+            cursor = self.sql_conn.cursor()
+            cursor.execute("SELECT TOP 1 Local_Updated_At FROM Inventory")
+        except:
+            log("[WARN] Local_Updated_At column missing. Adding it...")
+            try:
+                cursor.execute("ALTER TABLE Inventory ADD Local_Updated_At DATETIME DEFAULT GETDATE()")
+                self.sql_conn.commit()
+                log("[INFO] Added Local_Updated_At column to Inventory table.")
+                
+                # Create trigger for auto-updating timestamp
+                try:
+                    cursor.execute("""
+                        IF NOT EXISTS (SELECT * FROM sys.triggers WHERE name = 'trg_Inventory_UpdateTimestamp')
+                        BEGIN
+                            EXEC('CREATE TRIGGER trg_Inventory_UpdateTimestamp ON Inventory AFTER UPDATE AS BEGIN SET NOCOUNT ON; UPDATE Inventory SET Local_Updated_At = GETDATE() FROM Inventory i INNER JOIN inserted ins ON i.ItemNum = ins.ItemNum END')
+                        END
+                    """)
+                    self.sql_conn.commit()
+                    log("[INFO] Created auto-update trigger for Local_Updated_At.")
+                except Exception as te:
+                    log(f"[WARN] Could not create trigger: {te}")
+            except Exception as e:
+                log(f"[ERROR] Failed to add Local_Updated_At column: {e}", "ERROR")
 
     def load_last_sync(self):
         if os.path.exists(STATE_FILE):
@@ -174,8 +211,9 @@ class SyncAgent:
             query = """
                 SELECT ItemNum, ItemName, Dept_ID, In_Stock, Cost, Price, ItemType, Local_Updated_At
                 FROM Inventory
+                WHERE Store_ID = ?
             """
-            cursor.execute(query)
+            cursor.execute(query, (self.local_store_id,))
             items = []
             for row in cursor.fetchall():
                 try: item_type = int(row.ItemType or 0)
@@ -201,14 +239,12 @@ class SyncAgent:
             return []
 
     def sync_inventory(self, items):
-        """Sync inventory to Supabase with timestamp comparison"""
+        """Sync inventory to Supabase with timestamp comparison + BATCH UPLOAD"""
         if not items: return
         try:
             headers = {'apikey': SUPABASE_KEY, 'Authorization': f'Bearer {SUPABASE_KEY}', 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates'}
-            success = 0
-            skipped = 0
             
-            # Build lookup of cloud timestamps (Handle Pagination)
+            # 1. Fetch Cloud Timestamps (Pagination)
             cloud_headers = {'apikey': SUPABASE_KEY, 'Authorization': f'Bearer {SUPABASE_KEY}', 'Range': '0-999'}
             cloud_timestamps = {}
             offset = 0
@@ -227,12 +263,24 @@ class SyncAgent:
             
             log(f"Fetched {len(cloud_timestamps)} cloud timestamps for comparison")
 
+            # 2. Filter Items to Push
+            to_push = []
+            skipped_count = 0
+            recent_count = 0
+            
             for item in items:
-                local_updated = item.pop('_local_updated_at', None)  # Remove internal field before sending
+                local_updated = item.pop('_local_updated_at', None)  # Remove internal field
                 item_num = item['item_num']
+                
+                # Check 1: Skip if just synced down (Break Ping-Pong)
+                if item_num in self.synced_down_items:
+                    recent_count += 1
+                    continue
+
                 cloud_updated = cloud_timestamps.get(item_num, '')
                 
-                # Compare timestamps - only push if local is newer
+                # Check 2: Timestamp Comparison
+                should_push = True
                 if local_updated and cloud_updated:
                     from datetime import datetime, timedelta, timezone as tz
                     try:
@@ -241,20 +289,41 @@ class SyncAgent:
                         local_dt_utc = local_dt + timedelta(hours=6)  # CST to UTC
                         local_dt_utc = local_dt_utc.replace(tzinfo=tz.utc)
                         
-                        if cloud_dt >= local_dt_utc:
-                            skipped += 1
-                            continue  # Cloud is newer or same, skip push
-                    except:
-                        pass  # If parsing fails, proceed with push
+                        # Tolerance of 3 seconds to avoid micro-diff ping-pong
+                        if cloud_dt >= (local_dt_utc - timedelta(seconds=3)):
+                            should_push = False
+                    except: pass
                 
-                try:
-                    res = requests.post(f'{SUPABASE_URL}/rest/v1/inventory?on_conflict=item_num,store_id', headers=headers, json=item)
-                    if res.status_code in [200, 201, 204]: success += 1
-                except: pass
+                if should_push:
+                    to_push.append(item)
+                else:
+                    skipped_count += 1
+
+            if recent_count > 0:
+                 log(f"[SKIP] Ignored {recent_count} items just synced down.")
+            if skipped_count > 0:
+                 log(f"[SKIP] Ignored {skipped_count} items (Cloud newer/same).")
+
+            # 3. Batch Upload
+            if to_push:
+                log(f"[PUSH] Uploading {len(to_push)} items in batches...")
+                batch_size = 500
+                total_uploaded = 0
+                for i in range(0, len(to_push), batch_size):
+                    batch = to_push[i:i+batch_size]
+                    try:
+                        res = requests.post(f'{SUPABASE_URL}/rest/v1/inventory?on_conflict=item_num,store_id', headers=headers, json=batch)
+                        if res.status_code in [200, 201, 204]:
+                            total_uploaded += len(batch)
+                        else:
+                            log(f"[ERR] Batch upload failed: {res.status_code} {res.text}")
+                    except Exception as be:
+                        log(f"[ERR] Batch upload error: {be}")
                 
-            if skipped > 0:
-                log(f"[SKIP] Skipped {skipped} items (cloud is newer or same)")
-            log(f"[OK] Synced {success}/{len(items) - skipped} items")
+                log(f"[OK] Successfully pushed {total_uploaded} items.")
+            else:
+                 log("[OK] No local updates to push.")
+
         except Exception as e:
             log(f"[ERROR] Sync inventory failed: {e}", "ERROR")
 
@@ -352,7 +421,10 @@ class SyncAgent:
                         if exists:
                             cursor.execute("UPDATE Departments SET Description = ? WHERE Dept_ID = ?", (d['dept_name'], d['dept_id']))
                         else:
-                            cursor.execute("INSERT INTO Departments (Dept_ID, Description) VALUES (?, ?)", (d['dept_id'], d['dept_name']))
+                            cursor.execute("""
+                                INSERT INTO Departments (Dept_ID, Store_ID, Description, Type, TSDisplay, Cost_MarkUp, Dirty, SubType, Print_Dept_Notes, Require_Permission, Require_Serials, AvailableOnline, RowID) 
+                                VALUES (?, ?, ?, 0, 0, 0.0, 1, 'NONE', 0, 0, 0, 0, NEWID())
+                            """, (d['dept_id'], self.local_store_id, d['dept_name']))
                         self.sql_conn.commit()
                         count += 1
                     except Exception as e:
@@ -413,7 +485,10 @@ class SyncAgent:
                             cursor.execute("SELECT Local_Updated_At FROM Inventory WHERE ItemNum = ?", (i_num,))
                             row = cursor.fetchone()
                             
-                            # Retry loop for Deadlock Handling (Error 1205)
+                            # Calculate mapped Dept ID once
+                            target_dept_id = self.dept_map.get(str(i['dept_id']).strip(), str(i['dept_id']).strip())
+                            
+                            # Retry loop for Deadlock Handling (Error 1205) and FK Auto-Heal
                             max_retries = 3
                             for attempt in range(max_retries):
                                 try:
@@ -434,16 +509,20 @@ class SyncAgent:
                                         
                                         cursor.execute("""
                                             UPDATE Inventory 
-                                            SET ItemName=?, Price=?, Cost=?, Dept_ID=?, In_Stock=?, ItemType=?, Local_Updated_At=GETDATE()
+                                            SET ItemName=?, Price=?, Cost=?, In_Stock=?, ItemType=?, Local_Updated_At=GETDATE()
                                             WHERE ItemNum=?
-                                        """, (i['item_name'], i['price'], i['cost'], i['dept_id'], i['in_stock'], i.get('itemtype', 0), i_num))
+                                        """, (i['item_name'], i['price'], i['cost'], i['in_stock'], i.get('itemtype', 0), i_num))
                                     else:
                                         cursor.execute("""
                                             INSERT INTO Inventory (ItemNum, ItemName, Price, Cost, Dept_ID, In_Stock, ItemType, Store_ID, Local_Updated_At, Reorder_Level, Reorder_Quantity, Tax_1, Tax_2, Tax_3, IsKit, IsModifier, Inv_Num_Barcode_Labels, Use_Serial_Numbers, Num_Bonus_Points, IsRental, Use_Bulk_Pricing, Print_Ticket, Print_Voucher, Num_Days_Valid, IsMatrixItem, AutoWeigh, Dirty, FoodStampable, Exclude_Acct_Limit, Check_ID, Prompt_Price, Prompt_Quantity, Allow_BuyBack, Special_Permission, Prompt_Description, Check_ID2, Count_This_Item, Print_On_Receipt, Transfer_Markup_Enabled, As_Is)
                                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, GETDATE(), 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0)
-                                        """, (i_num, i['item_name'], i['price'], i['cost'], self.dept_map.get(str(i['dept_id']).strip(), str(i['dept_id']).strip()), i['in_stock'], i.get('itemtype', 0), self.local_store_id))
+                                        """, (i_num, i['item_name'], i['price'], i['cost'], target_dept_id, i['in_stock'], i.get('itemtype', 0), self.local_store_id))
                                     
-                                    self.sql_conn.commit()
+                                    
+                                    # Batch Commit (every 50 items)
+                                    if count % 50 == 0:
+                                        self.sql_conn.commit()
+                                        
                                     self.synced_down_items.add(i_num)
                                     count += 1
                                     break # Success, exit retry loop
@@ -459,9 +538,42 @@ class SyncAgent:
                                             continue
                                         else:
                                             log(f"[ERROR] Deadlock persisted for {i_num} after retries. Skipping.")
+                                    # Check for FK Constraint (547 / 23000)
+                                    elif "fkInventoryDepartments" in str(db_err) or '547' in str(db_err):
+                                         try:
+                                             log(f"[FIX] Missing Department '{target_dept_id}' detected. Auto-creating...")
+                                             # Auto-Create Missing Department
+                                             cursor.execute("""
+                                                INSERT INTO Departments (Dept_ID, Store_ID, Description, Type, TSDisplay, Cost_MarkUp, Dirty, SubType, Print_Dept_Notes, Require_Permission, Require_Serials, AvailableOnline, RowID) 
+                                                VALUES (?, ?, ?, 0, 0, 0.0, 1, 'NONE', 0, 0, 0, 0, NEWID())
+                                             """, (target_dept_id, self.local_store_id, target_dept_id))
+                                             self.sql_conn.commit()
+                                             log(f"[FIX] Successfully created department '{target_dept_id}'. Retrying item...")
+                                             continue # Retry immediately
+                                         except Exception as fix_err:
+                                             log(f"[ERROR] Failed to auto-create department '{target_dept_id}': {fix_err}")
+                                             raise db_err
                                     else:
-                                        raise db_err # Re-raise non-deadlock errors
+                                        raise db_err # Re-raise other errors
                         except Exception as e:
+                            if "fkInventoryDepartments" in str(e):
+                                # DIAGNOSTIC LOGGING
+                                log(f"[ERROR] FK Constraint Failure for Item {i_num} ({i['item_name']})")
+                                log(f" - Cloud Dept_ID: '{i['dept_id']}'")
+                                mapped_dept = self.dept_map.get(str(i['dept_id']).strip(), str(i['dept_id']).strip())
+                                log(f" - Mapped/Used Dept_ID: '{mapped_dept}'")
+                                
+                                # Dump existing departments
+                                try:
+                                    cursor.execute("SELECT Dept_ID FROM Departments")
+                                    existing_depts = [r[0] for r in cursor.fetchall()]
+                                    log(f" - Existing Local Depts ({len(existing_depts)}): {existing_depts}")
+                                    if mapped_dept in existing_depts:
+                                         log(" -> WEIRD: Mapped Dept IS in the list?! Check whitespace/encoding.")
+                                    else:
+                                         log(" -> ROOT CAUSE: Mapped Dept is NOT in the local Departments table.")
+                                except: pass
+                                
                             log(f"[WARN] Failed to apply item {i['item_num']}: {e}")
                     
                     total_synced += count
@@ -480,7 +592,8 @@ class SyncAgent:
         """Process incoming transfers"""
         try:
             headers = {'apikey': SUPABASE_KEY, 'Authorization': f'Bearer {SUPABASE_KEY}'}
-            res = requests.get(f'{SUPABASE_URL}/rest/v1/transfers?to_store=eq.{STORE_ID}&status=eq.in-transit', headers=headers)
+            # Fetch Transfers + Items
+            res = requests.get(f'{SUPABASE_URL}/rest/v1/transfers?to_store_id=eq.{STORE_ID}&status=eq.in_transit&select=*,transfer_items(*)', headers=headers)
             if res.status_code == 200:
                 transfers = res.json()
                 if transfers:
@@ -488,24 +601,90 @@ class SyncAgent:
                     cursor = self.sql_conn.cursor()
                     for t in transfers:
                         try:
-                            # Update Local Stock
-                            cursor.execute("UPDATE Inventory SET In_Stock = In_Stock + ? WHERE ItemNum = ?", (t['quantity'], t['item_num']))
-                            if cursor.rowcount == 0:
-                                # Item doesn't exist, create it? (Optional, skipping for now)
-                                log(f"[WARN] Transfer item {t['item_num']} not found locally, skipping stock add.")
-                            else:
-                                self.sql_conn.commit()
-
-                            # Mark Complete
-                            requests.patch(f'{SUPABASE_URL}/rest/v1/transfers?id=eq.{t["id"]}', 
-                                         headers=headers, 
-                                         json={'status': 'completed', 'received_at': datetime.now(timezone.utc).isoformat()})
+                            items = t.get('transfer_items', [])
+                            all_items_ok = True
                             
-                            log(f"[OK] Processed transfer {t['id']} ({t['item_name']})")
+                            for i in items:
+                                try:
+                                    # Update Local Stock
+                                    cursor.execute("UPDATE Inventory SET In_Stock = In_Stock + ? WHERE ItemNum = ?", (i['quantity'], i['item_num']))
+                                    if cursor.rowcount == 0:
+                                        log(f"[WARN] Transfer item {i['item_num']} not found locally, skipping stock add.")
+                                        # Optionally Auto-Create item here if needed
+                                except Exception as item_err:
+                                    log(f"[ERROR] Failed to process incoming item {i['item_num']}: {item_err}")
+                                    all_items_ok = False
+                            
+                            if all_items_ok:
+                                self.sql_conn.commit()
+                                # Mark Complete
+                                requests.patch(f'{SUPABASE_URL}/rest/v1/transfers?id=eq.{t["id"]}', 
+                                             headers=headers, 
+                                             json={'status': 'completed', 'completed_at': datetime.now(timezone.utc).isoformat()})
+                                
+                                log(f"[OK] Processed transfer {t['id']} (Items: {len(items)})")
+                            else:
+                                self.sql_conn.rollback()
+                                log(f"[ERR] Skipped transfer {t['id']} due to item errors.")
+
                         except Exception as ex:
                             log(f"[ERROR] Failed transfer {t['id']}: {ex}")
+            else:
+                log(f"[WARN] Failed to fetch transfers: {res.status_code} {res.text}")
         except Exception as e:
             log(f"[ERROR] Error processing transfers: {e}", "ERROR")
+
+    def process_outgoing_transfers(self):
+        """Process outgoing transfers - decrement stock and move to in-transit"""
+        try:
+            headers = {'apikey': SUPABASE_KEY, 'Authorization': f'Bearer {SUPABASE_KEY}', 'Content-Type': 'application/json'}
+            # Find approved transfers FROM this store
+            res = requests.get(f'{SUPABASE_URL}/rest/v1/transfers?from_store_id=eq.{STORE_ID}&status=eq.approved&select=*,transfer_items(*)', headers=headers)
+            if res.status_code == 200:
+                transfers = res.json()
+                if transfers:
+                    log(f"[OUT] Found {len(transfers)} approved outgoing transfers")
+                    cursor = self.sql_conn.cursor()
+                    for t in transfers:
+                        try:
+                            items = t.get('transfer_items', [])
+                            all_items_ok = True
+                            
+                            for i in items:
+                                try:
+                                    item_num = i['item_num']
+                                    quantity = i['quantity']
+                                    
+                                    # Check local stock first
+                                    cursor.execute("SELECT In_Stock FROM Inventory WHERE ItemNum = ?", (item_num,))
+                                    row = cursor.fetchone()
+                                    if row:
+                                        new_stock = float(row[0]) - float(quantity)
+                                        cursor.execute("UPDATE Inventory SET In_Stock = ? WHERE ItemNum = ?", (new_stock, item_num))
+                                    else:
+                                        log(f"[WARN] Outgoing Item {item_num} not found locally. Forcing stock decrement on Cloud only?")
+                                        # If not local, we can't decrement local.
+                                        pass
+                                except Exception as item_err:
+                                    log(f"[ERROR] Failed to process outgoing item {i['item_num']}: {item_err}")
+                                    all_items_ok = False
+                            
+                            if all_items_ok:
+                                self.sql_conn.commit()
+                                # Update Cloud Status -> in_transit
+                                patch_res = requests.patch(f'{SUPABASE_URL}/rest/v1/transfers?id=eq.{t["id"]}', 
+                                             headers=headers, 
+                                             json={'status': 'in_transit', 'shipped_at': datetime.now(timezone.utc).isoformat()})
+                                log(f"[OK] Processed outgoing transfer {t['id']}")
+                            else:
+                                self.sql_conn.rollback()
+                        
+                        except Exception as ex:
+                            log(f"[ERROR] Failed outgoing transfer {t['id']}: {ex}")
+            else:
+                 log(f"[WARN] Failed to fetch outgoing transfers: {res.status_code}")
+        except Exception as e:
+            log(f"[ERROR] Error processing outgoing transfers: {e}", "ERROR")
 
     def run(self):
         log(f" Starting {STORE_ID} Agent - TWO-WAY SYNC ENABLED")
@@ -517,6 +696,9 @@ class SyncAgent:
             input("Press Enter to exit...")
             return
 
+        # Ensure schema (Add ItemType, Local_Updated_At if missing)
+        self.ensure_schema()
+        
         log("[INFO] Database Connected! Starting sync loop...")
         
         last_sync_time = self.load_last_sync()
@@ -536,24 +718,25 @@ class SyncAgent:
                 # 0. Prime Dept Map
                 self.fetch_local_departments()
 
-                # 1. Departments (Down)
+                # 1. Transfers (High Priority)
+                self.process_transfers()
+                self.process_outgoing_transfers()
+
+                # 2. Departments (Up) - Push local departments to cloud FIRST
+                self.sync_departments(self.fetch_local_departments())
+                
+                # 2. Departments (Down) - Then pull any new ones from cloud
                 self.sync_down_departments(last_sync_time)
                 
-                # 2. Inventory (Down)
+                # 3. Inventory (Down)
                 self.sync_down_inventory(last_sync_time)
                 
                 # Update checkpoint
                 self.save_last_sync(current_sync_start)
                 last_sync_time = current_sync_start
 
-                # 3. Departments (Up)
-                self.sync_departments(self.fetch_local_departments())
-                
-                # 4. Inventory (Up)
+                # 5. Inventory (Up)
                 self.sync_inventory(self.fetch_inventory())
-                
-                # 5. Transfers
-                self.process_transfers()
                 
                 # 6. Process Soft Deletes (explicit check every cycle)
                 self.process_soft_deletes()
