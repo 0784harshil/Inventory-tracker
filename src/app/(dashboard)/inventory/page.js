@@ -23,7 +23,6 @@ export default function InventoryPage() {
     const [inventory, setInventory] = useState([]);
     const [stores, setStores] = useState([]);
     const [loading, setLoading] = useState(true);
-    const [loadingMore, setLoadingMore] = useState(false);
     const [error, setError] = useState(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -35,15 +34,13 @@ export default function InventoryPage() {
     const [selectedItems, setSelectedItems] = useState([]);
     const [pagination, setPagination] = useState({
         page: 1,
-        pageSize: 50, // Reduced initial load
+        pageSize: 50,
         totalItems: 0,
         totalPages: 0,
         hasMore: false
     });
 
     const searchTimeoutRef = useRef(null);
-    const observerRef = useRef(null);
-    const loadMoreRef = useRef(null);
     const abortControllerRef = useRef(null);
 
     // Debounce search input - 400ms delay
@@ -67,12 +64,11 @@ export default function InventoryPage() {
         fetchStores();
     }, []);
 
-    // Reset and fetch inventory when filters change
+    // Fetch inventory when filters or page changes
     useEffect(() => {
         setInventory([]);
-        setPagination(prev => ({ ...prev, page: 1 }));
-        fetchInventory(1, true);
-    }, [selectedStore, showLowStock, debouncedSearch, selectedDepartment, priceMin, priceMax]);
+        fetchInventory(pagination.page);
+    }, [selectedStore, showLowStock, debouncedSearch, selectedDepartment, priceMin, priceMax, pagination.page]);
 
     const fetchStores = async () => {
         try {
@@ -86,7 +82,7 @@ export default function InventoryPage() {
         }
     };
 
-    const fetchInventory = useCallback(async (page = 1, reset = false) => {
+    const fetchInventory = useCallback(async (page = 1) => {
         // Cancel any pending request
         if (abortControllerRef.current) {
             abortControllerRef.current.abort();
@@ -94,15 +90,11 @@ export default function InventoryPage() {
         abortControllerRef.current = new AbortController();
 
         try {
-            if (page === 1) {
-                setLoading(true);
-            } else {
-                setLoadingMore(true);
-            }
+            setLoading(true);
 
             const params = new URLSearchParams();
             params.append('page', page.toString());
-            params.append('pageSize', '50'); // Smaller page size for faster loads
+            params.append('pageSize', '50');
 
             if (selectedStore !== 'all') params.append('store', selectedStore);
             if (showLowStock) params.append('lowStock', 'true');
@@ -119,11 +111,7 @@ export default function InventoryPage() {
 
             const data = await res.json();
 
-            if (reset || page === 1) {
-                setInventory(data.items);
-            } else {
-                setInventory(prev => [...prev, ...data.items]);
-            }
+            setInventory(data.items);
             setPagination(data.pagination);
         } catch (err) {
             if (err.name === 'AbortError') {
@@ -133,35 +121,8 @@ export default function InventoryPage() {
             setError(err.message);
         } finally {
             setLoading(false);
-            setLoadingMore(false);
         }
     }, [selectedStore, showLowStock, debouncedSearch, selectedDepartment, priceMin, priceMax]);
-
-    // Infinite scroll with Intersection Observer
-    useEffect(() => {
-        if (observerRef.current) {
-            observerRef.current.disconnect();
-        }
-
-        observerRef.current = new IntersectionObserver(
-            (entries) => {
-                if (entries[0].isIntersecting && pagination.hasMore && !loadingMore && !loading) {
-                    fetchInventory(pagination.page + 1);
-                }
-            },
-            { threshold: 0.1, rootMargin: '100px' }
-        );
-
-        if (loadMoreRef.current) {
-            observerRef.current.observe(loadMoreRef.current);
-        }
-
-        return () => {
-            if (observerRef.current) {
-                observerRef.current.disconnect();
-            }
-        };
-    }, [pagination.hasMore, pagination.page, loadingMore, loading, fetchInventory]);
 
     // Keyboard shortcuts
     useEffect(() => {
@@ -184,6 +145,14 @@ export default function InventoryPage() {
 
     const handleSearch = (e) => {
         setSearchTerm(e.target.value);
+        setPagination(prev => ({ ...prev, page: 1 })); // Reset to page 1 on search
+    };
+
+    const handlePageChange = (newPage) => {
+        if (newPage >= 1 && newPage <= pagination.totalPages) {
+            setPagination(prev => ({ ...prev, page: newPage }));
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
     };
 
     const getStockStatus = (quantity) => {
@@ -254,6 +223,8 @@ export default function InventoryPage() {
             setInventory(prev => prev.filter(item => !selectedItems.includes(item.id)));
             setSelectedItems([]);
             alert('Items deleted successfully');
+            // Refresh current page to fill gaps
+            fetchInventory(pagination.page);
         } catch (err) {
             alert('Failed to delete some items: ' + err.message);
         }
@@ -310,7 +281,7 @@ export default function InventoryPage() {
                 <div className="error-message">
                     <h3>Error loading inventory</h3>
                     <p>{error}</p>
-                    <button onClick={() => fetchInventory(1, true)} className="btn btn-primary">Retry</button>
+                    <button onClick={() => fetchInventory(1)} className="btn btn-primary">Retry</button>
                 </div>
             </div>
         );
@@ -355,7 +326,7 @@ export default function InventoryPage() {
                 <div className="filter-group">
                     <select
                         value={selectedStore}
-                        onChange={(e) => setSelectedStore(e.target.value)}
+                        onChange={(e) => { setSelectedStore(e.target.value); setPagination(prev => ({ ...prev, page: 1 })); }}
                         className="filter-select"
                     >
                         <option value="all">All Stores</option>
@@ -369,13 +340,13 @@ export default function InventoryPage() {
                         <input
                             type="checkbox"
                             checked={showLowStock}
-                            onChange={(e) => setShowLowStock(e.target.checked)}
+                            onChange={(e) => { setShowLowStock(e.target.checked); setPagination(prev => ({ ...prev, page: 1 })); }}
                         />
                         Low Stock Only
                     </label>
                     <select
                         value={selectedDepartment}
-                        onChange={(e) => setSelectedDepartment(e.target.value)}
+                        onChange={(e) => { setSelectedDepartment(e.target.value); setPagination(prev => ({ ...prev, page: 1 })); }}
                         className="filter-select"
                         style={{ minWidth: '140px' }}
                     >
@@ -390,7 +361,7 @@ export default function InventoryPage() {
                             type="number"
                             placeholder="Min Price"
                             value={priceMin}
-                            onChange={(e) => setPriceMin(e.target.value)}
+                            onChange={(e) => { setPriceMin(e.target.value); setPagination(prev => ({ ...prev, page: 1 })); }}
                             className="search-input"
                             style={{ width: '100px' }}
                             min="0"
@@ -401,7 +372,7 @@ export default function InventoryPage() {
                             type="number"
                             placeholder="Max Price"
                             value={priceMax}
-                            onChange={(e) => setPriceMax(e.target.value)}
+                            onChange={(e) => { setPriceMax(e.target.value); setPagination(prev => ({ ...prev, page: 1 })); }}
                             className="search-input"
                             style={{ width: '100px' }}
                             min="0"
@@ -456,7 +427,7 @@ export default function InventoryPage() {
                             <tbody>
                                 {loading ? (
                                     // Show skeleton rows while loading
-                                    Array.from({ length: 10 }).map((_, i) => <SkeletonRow key={i} />)
+                                    Array.from({ length: 15 }).map((_, i) => <SkeletonRow key={i} />)
                                 ) : inventory.length === 0 ? (
                                     <tr>
                                         <td colSpan="9" style={{ textAlign: 'center', padding: '3rem' }}>
@@ -553,19 +524,28 @@ export default function InventoryPage() {
                         </table>
                     </div>
 
-                    {/* Load more trigger */}
-                    {!loading && (
-                        <div ref={loadMoreRef} style={{ height: '20px', marginTop: '20px' }}>
-                            {loadingMore && (
-                                <div className="loading-spinner" style={{ textAlign: 'center' }}>
-                                    Loading more items...
-                                </div>
-                            )}
-                            {!pagination.hasMore && inventory.length > 0 && (
-                                <p style={{ textAlign: 'center', color: 'var(--text-secondary)', margin: '20px 0' }}>
-                                    Showing all {pagination.totalItems.toLocaleString()} items
-                                </p>
-                            )}
+                    {/* Pagination Controls */}
+                    {!loading && pagination.totalPages > 1 && (
+                        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '16px', marginTop: '24px', paddingBottom: '24px' }}>
+                            <button
+                                onClick={() => handlePageChange(pagination.page - 1)}
+                                disabled={pagination.page === 1}
+                                className="btn btn-secondary"
+                            >
+                                Previous
+                            </button>
+
+                            <span style={{ color: 'var(--text-secondary)' }}>
+                                Page <strong style={{ color: 'var(--text-primary)' }}>{pagination.page}</strong> of <strong style={{ color: 'var(--text-primary)' }}>{pagination.totalPages}</strong>
+                            </span>
+
+                            <button
+                                onClick={() => handlePageChange(pagination.page + 1)}
+                                disabled={pagination.page === pagination.totalPages}
+                                className="btn btn-secondary"
+                            >
+                                Next
+                            </button>
                         </div>
                     )}
                 </div>
